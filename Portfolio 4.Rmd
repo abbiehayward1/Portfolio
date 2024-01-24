@@ -1,0 +1,311 @@
+---
+title: "Portfolio 4"
+author: "Abbie Hayward"
+date: "2024-01-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE}
+if(!require("finalfit")) install.packages("finalfit")
+library("finalfit")
+```
+
+##1.1 Data 
+
+```{r}
+#?colon
+```
+A data set from trials of adjuvant chemotherapy for colon cancer. Looking at the evetn type: reccurence/death, under variable "mort_5yr", to predict survival. 
+
+```{r}
+#summary(colon_s)
+```
+```{r}
+
+head(colon_s)
+```
+
+From the summary we can see a fair amount of NA's, and participant id, which will not be useful for analysis, and awful for anonymous health competition.
+
+Most fields are duplicated by a factor; lets get rid of this, including getting rid of the second "mort" variable we would like to predict, and do a basic missingness check.
+
+
+```{r}
+colon = as.data.frame(colon_s)[,-1] # remove the "id" column
+colon=colon[,-grep("factor",colnames(colon))]
+colon=colon[,!colnames(colon)%in%"mort_5yr.num"] # keep mort_5yr
+colon=colon[,c(1:12,14:16)]
+table(is.na(colon))
+```
+##1.2 Missingness evaluation
+
+Missingness is at <1% in this data. Lets check how to manage it:
+
+```{r}
+hist(rowSums(is.na(colon)),breaks=seq(-0.5,6.5),xlab="number of missing values",ylab="count")
+
+```
+From this it's hard to tell any stucture of missingness, so need to do further EDA and cleaning.
+
+```{r}
+library(VIM)
+aggr(colon, numbers = TRUE, sortVars = TRUE, labels = names(colon), cex.axis = 0.7, gap = 3)
+
+```
+From these graphs it is clear to see that any missingness in the dataframe only comes from the six variables:"differ", "obstruct", "loccomp", "nodes", "surg" and "mort_5yr". 
+
+Unfortunately, with missing data comes induced bias, innacurate and missleading results. In order to present data for an anonymised health data competition, missingness needs to be address along with further cleaning. 
+
+To "fill in" the missingness, different imputations can be performed to replace missing values with estimations. The use of imputations preserve the struture of the data, rather than cleaning by removing too many values and variables. Multiple imputation styles are performed below, eahc having a different effect on further anyalysis. The question is, which avenue to go down for "tidying up the data"? 
+
+It is also important that when considering imputations for dataframes, that the distribution stays similar to that before the imputation. Thus it makes sense to plot the original distributions for the variables with missing data. 
+
+We note that colnames(colon) include variables that we expect to be strongly correlated, such as nodes and node4. That is a problem for primary inference but is a benefit for imputation…!
+
+Its worth noting that one of the variables we predicted was mort_5yr; this a) bodes well for prediction, and b) could be dangerous if we use imputed values to truth our findings!
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+
+
+h1 <- ggplot(colon, aes(obstruct)) +
+  geom_histogram(fill = "#ad1538", color = "#000000", position = "identity") +
+  ggtitle("Original distribution") +
+  theme_classic()
+h2 <- ggplot(colon, aes(nodes)) +
+  geom_histogram(fill = "#15ad4f", color = "#000000", position = "identity") +
+  ggtitle("Zero-imputed distribution") +
+  theme_classic()
+h3 <- ggplot(colon, aes(differ)) +
+  geom_histogram(fill = "#1543ad", color = "#000000", position = "identity") +
+  ggtitle("Mean-imputed distribution") +
+  theme_classic()
+h4 <- ggplot(colon, aes(surg)) +
+  geom_histogram(fill = "#ad8415", color = "#000000", position = "identity") +
+  ggtitle("Median-imputed distribution") +
+  theme_classic()
+h5 <- ggplot(colon, aes(loccomp)) +
+  geom_histogram(fill = "#1543ad", color = "#000000", position = "identity") +
+  ggtitle("loccomp") +
+  theme_classic()
+h6 <- ggplot(colon, aes(mort_5yr)) +
+  geom_histogram(fill = "#ad8415", color = "#000000", position = "identity", stat="count") +
+  ggtitle("mort_5yr") +
+  theme_classic()
+
+plot_grid(h1, h2, h3, h4,h5, h6, nrow = 2, ncol = 3)
+
+
+```
+Unfortunately since most of the variables are binary, there's little insight from their distributions. However we could still draw a comparison for how each imputation dealt with the nodes variable...
+
+
+##2.1 KNN imputation
+
+We can perform KNN imputation, that involves replacing any missing values with the value of the K-nearest neighbour, this is a metric based on local distances. 
+
+Note here, the kNN is a K-Nearest Neighbour imputation based on a variation of the Gower Distance, rather than the SVD imputation in the lecture notes, due to the binary variables we are trying to impute, alongside categorical factors. 
+
+```{r}
+#install.packages("VIM")
+
+library(VIM)
+
+            
+imputed_knn <- kNN(colon, k=5) #here we take a default of k=5
+imputed_knn = imputed_knn[-(16:30)]
+
+head(imputed_knn)
+#Checking no more NAs
+#table(is.na(imputed_knn))
+```
+
+
+##2.3 Regression imputation
+Regression can be used where there is a correlation between variables within the data set, where one variable could predict the outcome for another variable. From a brief glance of the dataset, there seems to be some correlation between variables and thus there is potential for a regression imputation. Where correlation is significant. 
+
+
+```{r, warning=FALSE}
+
+allpresent=colnames(colon)[colSums(is.na(colon))==0] # columns with no missingness
+allpresent=allpresent[allpresent!="anymissing"] 
+
+
+missingcols=colnames(colon)[colSums(is.na(colon))>0] # columns with no missingness
+train=sample(1:dim(colon)[1])[1:700] # training data
+test=(1:dim(colon)[1])[!(1:dim(colon)[1])%in%train] # 229 reserved for training...
+#sapply(missingcols,function(x)length(table(colon[ttest,x])))
+
+## correlation scores
+allscores=c() #
+allclasses=c() # correlation classes
+colonimp=colon
+for(v in missingcols){
+  ttest=test[!is.na(colon[test,v])] # get the subset of available values
+  tmiss=which(is.na(colon[,v])) # A list of missing data in this column
+  isbinary=length(table(colon[ttest,v]))==2 # whether this variable is a binary variable or not
+  if(isbinary){
+      tmodel=glm(paste(v,"~",paste(allpresent,collapse="+"),collapse=""),
+                      data=colon[train,c(v,allpresent)],family = binomial)
+  }else{
+    tmodel=lm(paste(v,"~",paste(allpresent,collapse="+"),collapse=""),
+                      data=colon[train,c(v,allpresent)]) 
+  }
+  ## glm will automatically omit missing data in the training data
+  tpred=predict(tmodel,newdata=colon[ttest,],type="response") # For performance evaluation, predicting the test data
+  tscore=cor(as.numeric(colon[ttest,v]),tpred) ## We will use correlation as a score
+  names(isbinary)=names(tscore)=v # annoyingly R loses the names so we put the name on manually 
+  print(paste("Correlation between observed and prediction for column",v,"=",tscore))
+  allscores=c(allscores,tscore)
+  allclasses=c(allclasses,isbinary)
+  ## Now we have scores, we'll apply the prediction to the unseen data
+  tpredimpute=predict(tmodel,newdata=colon[tmiss,,drop=FALSE],type="response") # For imputation
+  if(tscore>0.6){ # If imputation is good enough, use it
+    if(isbinary){
+      if(is.factor(colonimp[,v])){ 
+        colonimp[tmiss,v]=levels(colonimp[tmiss,v])[1+round(tpredimpute)]
+      }else {
+        colonimp[tmiss,v]=round(tpredimpute)
+      }
+    }else{
+      colonimp[tmiss,v]=tpredimpute
+    }
+  }
+}
+
+```
+```{r}
+c("cols with missingness"=sum(colSums(apply(colon,2,is.na))>0),
+  "after imputation"=sum(colSums(apply(colonimp,2,is.na))>0))
+
+```
+Since regression only applicable to variables with significant correlation score, further imputations are still required. Here we could perform an additional kNN imputation to fill in the further missing errors for the final three variables. Which is necessary where some variables are catergorical...
+```{r}
+imputed_regknn <- kNN(colonimp, k=5) #here we take a default of k=5
+imputed_regknn = imputed_knn[-(16:30)]
+
+head(imputed_regknn)
+#Checking no more NAs
+#table(is.na(imputed_regknn))
+
+
+```
+Here all missing values are filled in, with a combination of regression and kNN imputation. 
+Clearly there is a high correlation between the node4 and nodes observation, this implies we could use a regression imputation to replace missing values in the nodes variable. 
+
+
+
+## 2.4 Random forest imputation 
+The Miss Forest imputation technique is based on the Random Forest algorithm. It’s a non-parametric imputation method, which means it doesn’t make explicit assumptions about the function form, but instead tries to estimate the function in a way that’s closest to the data points.
+
+In other words, it builds a random forest model for each variable and then uses the model to predict missing values. You can learn more about it by reading the article by Oxford Academic.
+
+```{r, warning=FALSE}
+#install.packages("missForest")
+library(missForest)
+
+forest_imputation = missForest(colon)$ximp
+head(forest_imputation)
+
+# Checking no more NAs
+#table(is.na(forest_imputation))
+
+```
+
+
+
+Now 3 different imputations have been performed over the dataframe, further analysis is needed to infer which imputation is the "best" 
+
+## 3.1 Imputation comparison 
+
+```{r}
+h1 <- ggplot(colon, aes(nodes)) +
+  geom_histogram(fill = "#ad1538", color = "#000000", position = "identity") +
+  ggtitle("Original node distribution") +
+  theme_classic()
+h2 <- ggplot(imputed_knn, aes(nodes)) +
+  geom_histogram(fill = "#15ad4f", color = "#000000", position = "identity") +
+  ggtitle("kNN imputation") +
+  theme_classic()
+h3 <- ggplot(imputed_regknn, aes(nodes)) +
+  geom_histogram(fill = "#1543ad", color = "#000000", position = "identity") +
+  ggtitle("Regression & kNN imputation") +
+  theme_classic()
+h4 <- ggplot(forest_imputation, aes(nodes)) +
+  geom_histogram(fill = "#ad8415", color = "#000000", position = "identity") +
+  ggtitle("Random forest imputation") +
+  theme_classic()
+
+plot_grid(h1, h2, h3, h4, nrow = 2, ncol = 2)
+```
+From the distribtions of the nodes vairable after each imputation, it is clear to see none of the imputations cause drastic changes to the distribution (which is always a good thing). With all plots being extremely close to the original distribution for nodes, there is no clear best choice for imputation on the node variable.
+
+However, due to complexity of relationships between vairables (where some relationships aren't linear) it makes sense to favour the knn model or random forest model over the regression model (that relies highly on linear relationships). 
+
+## 4.1 EDA and tidying 
+
+Removing duplicate factors & observations where NA occurs for target variable 'mort_5yr'. 
+
+```{r}
+colon = as.data.frame(colon_s)[,-1] # remove the "id" column
+colon=colon[,-grep("factor",colnames(colon))]
+colon=colon[,!colnames(colon)%in%"mort_5yr.num"] # keep mort_5yr
+colon=colon[,c(1:12,14:16)]
+colon = colon[-which(is.na(colon$mort_5yr)),]
+# checking no more NA's in new colon for the target variable mort_5yr
+# sum(is.na(colon$mort_5yr))
+
+
+```
+```{r}
+
+table(is.na(colon))
+```
+Imputing missing data using kNN imputation (note could've used random forest but data sufficiently small for kNN).
+
+
+```{r}
+imputed_knn <- kNN(colon, k=5) #here we take a default of k=5
+imputed_knn = imputed_knn[-(16:30)]
+
+head(imputed_knn)
+table(is.na(imputed_knn))
+
+
+```
+After performing the kNN imputation, it is also important to note the 'node4' is the variable for "more than 4 postivie lymph nodes", whilst 'nodes' is "number of lymph nodes with detectable cancer", thus after we have essentially used node4 to perform an imputation on nodes. There is a clear relationship to node4 = 0, when nodes <4, and when node=1, nodes => 4, this implies another "duplicate" variable that wont provide any insight into inferences. Thus we can remode the node4, for a "tidier" dataset. 
+
+```{r}
+
+imputed_knn = imputed_knn[-12]
+
+```
+
+The remove constant function removes low variance variables which if present wouldn't show any significant relationship to the 'mort_5yr' variable, due to almost constant variable. 
+
+
+```{r}
+library(janitor)
+
+colon <- imputed_knn %>%
+remove_constant()
+head(colon)
+
+
+```
+Note here, no low variance variables so dataset is the same. 
+
+For the final dataset presented for further research in an anonymised health data competition, since id was equal to index, it is important to "shuffle" the row names of the final dataset, so no id could be extracted from its relationship to row names that would reveal any identity. 
+
+```{r}
+rownames(colon) <- sample(nrow(colon))
+head(colon)
+```
+ 
